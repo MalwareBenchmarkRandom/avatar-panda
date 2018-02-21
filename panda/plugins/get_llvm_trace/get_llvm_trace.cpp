@@ -18,12 +18,16 @@ extern "C" {
 //llvm::FunctionPassManager *FPM = nullptr;
 
 int trace_block_exec(CPUState *cpu, TranslationBlock *tb){
-    printf("block exec:\n");
+    static int counter = 0;
+
+    printf("%d. block exec:\n", counter);
     printf("\t\ttb->pc: %x\n", tb->pc);
     printf("\t\ttb->cs_base: %x\n", tb->cs_base);
     printf("\t\ttb->flags: %x\n", tb->flags);
     printf("\t\ttb->llvm_tc_ptr: %x\n", tb->llvm_tc_ptr);
     printf("\t\ttb->llvm_tc_end: %x\n", tb->llvm_tc_end);
+
+    counter++;
     return 0;
 }
 
