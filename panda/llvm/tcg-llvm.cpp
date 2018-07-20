@@ -64,6 +64,13 @@
 #include "panda/tcg-llvm.h"
 #include "panda/helper_runtime.h"
 
+#include "llvm/IRReader/IRReader.h"
+#include "llvm/Support/SourceMgr.h"
+extern "C" {
+#include <libgen.h>
+}
+
+
 #if defined(CONFIG_SOFTMMU)
 
 // To support other architectures, make similar minor changes to op_helper.c
@@ -1426,6 +1433,9 @@ int TCGLLVMContextPrivate::generateOperation(int opc, const TCGOp *op,
     return nb_args;
 }
 
+// resolved full path to the current executable
+extern const char *qemu_file;
+
 void TCGLLVMContextPrivate::generateCode(TCGContext *s, TranslationBlock *tb)
 {
     /* Create new function for current translation block */
@@ -1445,7 +1455,25 @@ void TCGLLVMContextPrivate::generateCode(TCGContext *s, TranslationBlock *tb)
     */
 
     if (m_CPUArchStateType == nullptr) {
-        init_llvm_helpers();
+        // XXX: instead of adding all the helper functions I just extract the
+        // definition of the struct CPUARMState from llvm-helpers.bc
+        //init_llvm_helpers();
+
+        // code taken from helper_runtime.cpp - begin
+        // Read helper module, link into JIT, verify
+        char *exe = strdup(qemu_file);
+        //errs() << "qemu_file: " << qemu_file << "\n";
+        std::string bitcode(dirname(exe));
+        free(exe);
+        bitcode.append("/llvm-helpers.bc");
+
+        SMDiagnostic Err;
+        llvm::Module *helpermod = ParseIRFile(bitcode, Err, m_context);
+        if (!helpermod) {
+            Err.print("qemu", llvm::errs());
+            exit(1);
+        }
+        // code taken from helper_runtime.cpp - end
         m_CPUArchStateType = m_module->getTypeByName(m_CPUArchStateName);
     }
     assert(m_CPUArchStateType);
@@ -1466,7 +1494,6 @@ void TCGLLVMContextPrivate::generateCode(TCGContext *s, TranslationBlock *tb)
     initGlobalsAndLocalTemps();
 
     LLVMContext &C = m_context;
-    MDNode *PCUpdateMD = MDNode::get(C, MDString::get(C, "pcupdate"));
     MDNode *RRUpdateMD = MDNode::get(C, MDString::get(C, "rrupdate"));
     MDNode *RuntimeMD = MDNode::get(C, MDString::get(C, "runtime"));
 
@@ -1476,14 +1503,6 @@ void TCGLLVMContextPrivate::generateCode(TCGContext *s, TranslationBlock *tb)
     m_envInt = m_builder.CreatePtrToInt(m_tbFunction->arg_begin(), wordType());
     Instruction *EnvI2PI = dyn_cast<Instruction>(m_envInt);
     if (EnvI2PI) EnvI2PI->setMetadata("host", RuntimeMD);
-
-    /* Setup panda_guest_pc and last_pc stores */
-    Constant *GuestPCPtrInt = constInt(sizeof(uintptr_t) * 8,
-            (uintptr_t)&first_cpu->panda_guest_pc);
-    Value *GuestPCPtr = m_builder.CreateIntToPtr(GuestPCPtrInt, intPtrType(64), "guestpc");
-    Constant *LastPCPtrInt = constInt(sizeof(uintptr_t) * 8,
-            (uintptr_t)&tcg_llvm_runtime.last_pc);
-    Value *LastPCPtr = m_builder.CreateIntToPtr(LastPCPtrInt, intPtrType(64), "lastpc");
 
     /* Setup rr_guest_instr_count stores */
     Constant *InstrCountPtrInt = constInt(sizeof(uintptr_t) * 8,
@@ -1518,17 +1537,6 @@ void TCGLLVMContextPrivate::generateCode(TCGContext *s, TranslationBlock *tb)
 
             //std::cout << ss.str() << "\n";
             //printf("\n");
-            MDNode *targetAsmMD = MDNode::get(C, MDString::get(C, codebuf));
-
-            // volatile store of current PC
-            Constant *PC = ConstantInt::get(intType(64), args[0]);
-            Instruction *LastPCSt = m_builder.CreateStore(PC, LastPCPtr, true);
-            Instruction *GuestPCSt = m_builder.CreateStore(PC, GuestPCPtr, true);
-            // TRL 2014 hack to annotate that last instruction as the one
-            // that sets PC
-            LastPCSt->setMetadata("host", PCUpdateMD);
-            GuestPCSt->setMetadata("host", PCUpdateMD);
-            GuestPCSt->setMetadata("targetAsm", targetAsmMD);
 
             InstrCount = dyn_cast<Instruction>(
                     m_builder.CreateAdd(InstrCount, One64, "rrgic"));
